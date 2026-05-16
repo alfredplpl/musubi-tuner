@@ -230,6 +230,47 @@ FLUX.2ではDoubleStreamBlockのメモリ使用量がSingleStreamBlockよりも�
 
 </details>
 
+### Full Fine-tuning / フルファインチューニング
+
+Full fine-tuning for FLUX.2 [klein] base 4B uses `flux_2_train.py`. Use the same latent and Text Encoder output caches as LoRA training.
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/flux_2_train.py \
+    --model_version klein-base-4b \
+    --dit path/to/flux2-klein-base-4b.safetensors \
+    --vae path/to/ae.safetensors \
+    --text_encoder path/to/text_encoder/00001-of-00002.safetensors \
+    --dataset_config path/to/toml \
+    --sdpa --mixed_precision bf16 \
+    --timestep_sampling flux2_shift --weighting_scheme none \
+    --optimizer_type adamw8bit --learning_rate 1e-5 --gradient_checkpointing \
+    --full_bf16 \
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers \
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
+    --output_dir path/to/output_dir --output_name name-of-model
+```
+
+- Uses `flux_2_train.py`.
+- Specify `--model_version klein-base-4b` for FLUX.2 [klein] base 4B.
+- Do not specify `--network_module`; this trains the DiT weights directly.
+- `--full_bf16` is recommended to reduce memory usage. It requires `--mixed_precision bf16`.
+- FP8 DiT training is disabled for full fine-tuning, so `--fp8_base` and `--fp8_scaled` are ignored.
+- The output is a full DiT checkpoint, not a LoRA checkpoint.
+
+<details>
+<summary>日本語</summary>
+
+FLUX.2 [klein] base 4B のフルファインチューニングには `flux_2_train.py` を使用します。LoRA学習と同じ latent / Text Encoder output のキャッシュを使用します。
+
+- `flux_2_train.py`を使用します。
+- FLUX.2 [klein] base 4B では `--model_version klein-base-4b` を指定してください。
+- `--network_module` は指定しません。DiT本体の重みを直接学習します。
+- メモリ削減のため `--full_bf16` を推奨します。`--mixed_precision bf16` が必要です。
+- フルファインチューニングではDiTのFP8学習は無効化されるため、`--fp8_base` と `--fp8_scaled` は無視されます。
+- 出力はLoRAではなく、フルDiTチェックポイントです。
+
+</details>
+
 ## Inference / 推論
 
 Inference uses a dedicated script `flux_2_generate_image.py`.
