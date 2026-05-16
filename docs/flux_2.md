@@ -111,6 +111,15 @@ python src/musubi_tuner/flux_2_cache_latents.py \
 - Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - The `control_images` in the dataset config is used as the reference image. See [Dataset Config](./dataset_config.md#flux1-kontext-dev) for details.
 - `--vae_dtype` option is available to specify the VAE weight data type. Default is `float32`, `bfloat16` can also be specified. Specifying `bfloat16` reduces VRAM usage.
+- To cache latents with multiple GPUs, specify `--multi_gpu_devices` with a comma-separated list of GPU IDs or devices:
+
+```bash
+python src/musubi_tuner/flux_2_cache_latents.py \
+    --dataset_config path/to/toml \
+    --vae path/to/ae_model \
+    --model_version klein-base-4b \
+    --multi_gpu_devices 0,1
+```
 
 <details>
 <summary>日本語</summary>
@@ -122,6 +131,15 @@ latentの事前キャッシングはFLUX.2専用のスクリプトを使用し�
 - データセットは画像データセットである必要があります。
 - データセット設定の`control_images`が参照画像として使用されます。詳細は[データセット設定](./dataset_config.md#flux1-kontext-dev)を参照してください。
 - `--vae_dtype`オプションは、VAEの重みデータ型を指定するためのオプションです。デフォルトは`float32`で、`bfloat16`も指定可能です。`bfloat16`を指定するとVRAM使用量が削減されます。
+- 複数GPUでlatentをキャッシュする場合は、GPU IDまたはdeviceをカンマ区切りで`--multi_gpu_devices`に指定してください。
+
+```bash
+python src/musubi_tuner/flux_2_cache_latents.py \
+    --dataset_config path/to/toml \
+    --vae path/to/ae_model \
+    --model_version klein-base-4b \
+    --multi_gpu_devices 0,1
+```
 
 </details>
 
@@ -142,6 +160,16 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 - Use the `--model_version` option for Flux.2 Klein training (if omitted, defaults to `dev`).
 - Use `--fp8_text_encoder` option to run the Text Encoder in fp8 mode for VRAM savings.
 - The larger the batch size, the more VRAM is required. Adjust `--batch_size` according to your VRAM capacity.
+- To cache text encoder outputs with multiple GPUs, specify `--multi_gpu_devices` with a comma-separated list of GPU IDs or devices:
+
+```bash
+python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
+    --dataset_config path/to/toml \
+    --text_encoder path/to/text_encoder \
+    --batch_size 16 \
+    --model_version klein-base-4b \
+    --multi_gpu_devices 0,1
+```
 
 <details>
 <summary>日本語</summary>
@@ -151,6 +179,16 @@ python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
 - `flux_2_cache_text_encoder_outputs.py`を使用します。
 - テキストエンコーダーをfp8モードで実行するための`--fp8_text_encoder`オプションを使用します。
 - バッチサイズが大きいほど、より多くのVRAMが必要です。VRAM容量に応じて`--batch_size`を調整してください。
+- 複数GPUでテキストエンコーダー出力をキャッシュする場合は、GPU IDまたはdeviceをカンマ区切りで`--multi_gpu_devices`に指定してください。
+
+```bash
+python src/musubi_tuner/flux_2_cache_text_encoder_outputs.py \
+    --dataset_config path/to/toml \
+    --text_encoder path/to/text_encoder \
+    --batch_size 16 \
+    --model_version klein-base-4b \
+    --multi_gpu_devices 0,1
+```
 
 </details>
 
