@@ -48,6 +48,7 @@ class ImageDatasetParams(BaseDatasetParams):
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
     multiple_target: Optional[bool] = False
+    no_latent_cache: Optional[bool] = False
 
     # FramePack dependent parameters
     fp_latent_window_size: Optional[int] = 9

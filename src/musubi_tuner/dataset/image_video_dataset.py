@@ -199,6 +199,7 @@ class ItemInfo:
 
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
+        self.source_index: Optional[int] = None
 
         # FramePack architecture specific
         self.fp_latent_window_size: Optional[int] = None
@@ -1786,6 +1787,7 @@ class ImageDataset(BaseDataset):
         fp_1f_clean_indices: Optional[list[int]] = None,
         fp_1f_target_index: Optional[int] = None,
         fp_1f_no_post: Optional[bool] = False,
+        no_latent_cache: Optional[bool] = False,
         no_resize_control: Optional[bool] = False,
         control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
@@ -1810,6 +1812,7 @@ class ImageDataset(BaseDataset):
         self.fp_1f_clean_indices = fp_1f_clean_indices
         self.fp_1f_target_index = fp_1f_target_index
         self.fp_1f_no_post = fp_1f_no_post
+        self.no_latent_cache = no_latent_cache
         self.no_resize_control = no_resize_control
         self.control_resolution = control_resolution
 
@@ -2000,6 +2003,10 @@ class ImageDataset(BaseDataset):
         return self._default_retrieve_text_encoder_output_cache_batches(self.datasource, self.batch_size, num_workers)
 
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
+        if self.no_latent_cache:
+            self.prepare_for_training_without_latent_cache(num_timestep_buckets)
+            return
+
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
@@ -2051,6 +2058,146 @@ class ImageDataset(BaseDataset):
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
 
+    def prepare_for_training_without_latent_cache(self, num_timestep_buckets: Optional[int] = None):
+        if self.architecture not in (
+            ARCHITECTURE_FLUX_2_DEV,
+            ARCHITECTURE_FLUX_2_KLEIN_4B,
+            ARCHITECTURE_FLUX_2_KLEIN_9B,
+        ):
+            raise ValueError("--no_latent_cache is currently supported only for FLUX.2 image datasets")
+        if not self.datasource.is_indexable():
+            raise ValueError("--no_latent_cache requires an indexable image dataset")
+
+        bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
+        bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
+
+        for source_index in range(len(self.datasource)):
+            image_key, images, _caption, controls = self.datasource.get_image_data(source_index)
+            image = images[0]
+            image_size = image.size
+            bucket_reso = bucket_selector.get_bucket_resolution(image_size)
+
+            item_key = os.path.splitext(os.path.basename(image_key))[0]
+            text_encoder_output_cache_file = os.path.join(
+                self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors"
+            )
+            if not os.path.exists(text_encoder_output_cache_file):
+                logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
+                continue
+
+            batch_bucket_reso: Union[tuple[int, int], Any] = bucket_reso
+            if controls is not None and (self.no_resize_control or self.control_resolution is not None):
+                batch_bucket_reso = list(batch_bucket_reso)
+                for control in controls:
+                    if self.no_resize_control:
+                        width, height = control.size
+                        if self.control_resolution is not None:
+                            max_width, max_height = self.control_resolution
+                            if width * height > max_width * max_height:
+                                width, height = BucketSelector.calculate_bucket_resolution(
+                                    control.size, self.control_resolution, architecture=self.architecture
+                                )
+                        else:
+                            width = width - (width % bucket_selector.reso_steps)
+                            height = height - (height % bucket_selector.reso_steps)
+                        batch_bucket_reso = batch_bucket_reso + [height, width]
+                    elif self.control_resolution is not None:
+                        width, height = BucketSelector.calculate_bucket_resolution(
+                            control.size, self.control_resolution, architecture=self.architecture
+                        )
+                        batch_bucket_reso = batch_bucket_reso + [height, width]
+                batch_bucket_reso = tuple(batch_bucket_reso)
+
+            item_info = ItemInfo(item_key, "", image_size, batch_bucket_reso)
+            item_info.source_index = source_index
+            item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
+
+            bucket = bucketed_item_info.get(batch_bucket_reso, [])
+            for _ in range(self.num_repeats):
+                bucket.append(item_info)
+            bucketed_item_info[batch_bucket_reso] = bucket
+
+            for opened_image in images:
+                opened_image.close()
+            if controls is not None:
+                for opened_control in controls:
+                    opened_control.close()
+
+        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        self.batch_manager.show_bucket_info()
+        self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
+
+    def get_image_batch_for_training(self, item_infos: list[ItemInfo]) -> dict[str, torch.Tensor]:
+        batch_tensor_data = {}
+        varlen_keys = set()
+        images = []
+        controls_list = []
+
+        for item_info in item_infos:
+            assert item_info.source_index is not None
+            _image_key, source_images, _caption, controls = self.datasource.get_image_data(item_info.source_index)
+            bucket_reso = item_info.bucket_size[:2]
+            source_image = resize_image_to_bucket(source_images[0], bucket_reso)
+            images.append(torch.from_numpy(source_image))
+
+            if controls is not None:
+                resized_controls = []
+                if self.no_resize_control:
+                    for control in controls:
+                        width, height = control.size
+                        if self.control_resolution is not None:
+                            max_width, max_height = self.control_resolution
+                            if width * height > max_width * max_height:
+                                width, height = BucketSelector.calculate_bucket_resolution(
+                                    control.size, self.control_resolution, architecture=self.architecture
+                                )
+                        else:
+                            width = width - (width % BucketSelector.ARCHITECTURE_STEPS_MAP[self.architecture])
+                            height = height - (height % BucketSelector.ARCHITECTURE_STEPS_MAP[self.architecture])
+                        resized_controls.append(torch.from_numpy(resize_image_to_bucket(control, (width, height))))
+                elif self.control_resolution is not None:
+                    for control in controls:
+                        control_bucket_reso = BucketSelector.calculate_bucket_resolution(
+                            control.size, self.control_resolution, architecture=self.architecture
+                        )
+                        resized_controls.append(torch.from_numpy(resize_image_to_bucket(control, control_bucket_reso)))
+                else:
+                    resized_controls = [
+                        torch.from_numpy(resize_image_to_bucket(control, bucket_reso)) for control in controls
+                    ]
+                controls_list.append(resized_controls)
+
+            for opened_image in source_images:
+                opened_image.close()
+            if controls is not None:
+                for opened_control in controls:
+                    opened_control.close()
+
+            sd_te = load_file(item_info.text_encoder_output_cache_path)
+            for key in sd_te.keys():
+                is_varlen_key = key.startswith("varlen_")
+                content_key = key.replace("varlen_", "") if is_varlen_key else key
+                if not content_key.endswith("_mask"):
+                    content_key = content_key.rsplit("_", 1)[0]
+                if content_key not in batch_tensor_data:
+                    batch_tensor_data[content_key] = []
+                batch_tensor_data[content_key].append(sd_te[key])
+                if is_varlen_key:
+                    varlen_keys.add(content_key)
+
+        for key in batch_tensor_data.keys():
+            if key not in varlen_keys:
+                batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
+
+        batch_tensor_data["images"] = torch.stack(images)
+        if controls_list:
+            num_controls = len(controls_list[0])
+            for control_index in range(num_controls):
+                batch_tensor_data[f"control_images_{control_index}"] = torch.stack(
+                    [controls[control_index] for controls in controls_list]
+                )
+        return batch_tensor_data
+
     def shuffle_buckets(self):
         # set random seed for this epoch
         random.seed(self.seed + self.current_epoch)
@@ -2063,6 +2210,17 @@ class ImageDataset(BaseDataset):
 
     def __getitem__(self, idx):
         super().__getitem__(idx)
+        if self.no_latent_cache:
+            bucket_reso, batch_idx = self.batch_manager.bucket_batch_indices[idx]
+            bucket = self.batch_manager.buckets[bucket_reso]
+            start = batch_idx * self.batch_size
+            end = min(start + self.batch_size, len(bucket))
+            batch_tensor_data = self.get_image_batch_for_training(bucket[start:end])
+            if self.batch_manager.timestep_pool is not None:
+                batch_tensor_data["timesteps"] = self.batch_manager.timestep_pool[idx][: end - start]
+            else:
+                batch_tensor_data["timesteps"] = None
+            return batch_tensor_data
         return self.batch_manager[idx]
 
 

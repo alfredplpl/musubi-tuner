@@ -1733,8 +1733,10 @@ class NetworkTrainer:
         vae_dtype = torch.float16 if args.vae_dtype is None else model_utils.str_to_dtype(args.vae_dtype)
         sample_parameters = None
         vae = None
-        if args.sample_prompts:
-            sample_parameters = self.process_sample_prompts(args, accelerator, args.sample_prompts)
+        needs_training_vae = getattr(args, "no_latent_cache", False)
+        if args.sample_prompts or needs_training_vae:
+            if args.sample_prompts:
+                sample_parameters = self.process_sample_prompts(args, accelerator, args.sample_prompts)
 
             # Load VAE model for sampling images: VAE is loaded to cpu to save gpu memory
             vae = self.load_vae(args, vae_dtype=vae_dtype, vae_path=args.vae)
@@ -2182,6 +2184,8 @@ class NetworkTrainer:
             for step, batch in enumerate(train_dataloader):
                 # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
 
+                if hasattr(self, "encode_latents_in_batch"):
+                    batch = self.encode_latents_in_batch(args, accelerator, vae, batch)
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):

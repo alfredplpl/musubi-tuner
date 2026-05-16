@@ -255,6 +255,38 @@ class Flux2NetworkTrainer(NetworkTrainer):
     def scale_shift_latents(self, latents):
         return latents
 
+    def encode_latents_in_batch(
+        self, args: argparse.Namespace, accelerator: Accelerator, vae, batch: dict[str, torch.Tensor]
+    ):
+        if "latents" in batch:
+            return batch
+
+        if vae is None:
+            raise ValueError("--no_latent_cache requires --vae so training images can be encoded during training")
+        if "images" not in batch:
+            raise ValueError("Batch does not contain latents or source images")
+
+        device = accelerator.device
+        vae.to(device)
+        vae.eval()
+
+        images = batch.pop("images").to(device=device, dtype=vae.dtype)
+        images = images.permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+
+        with torch.no_grad():
+            batch["latents"] = vae.encode(images)
+
+            control_index = 0
+            while f"control_images_{control_index}" in batch:
+                control_images = batch.pop(f"control_images_{control_index}").to(device=device, dtype=vae.dtype)
+                control_images = control_images.permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+                batch[f"latents_control_{control_index}"] = vae.encode(control_images)
+                control_index += 1
+
+        vae.to("cpu")
+        clean_memory_on_device(device)
+        return batch
+
     def call_dit(
         self,
         args: argparse.Namespace,
@@ -340,6 +372,11 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument(
+        "--no_latent_cache",
+        action="store_true",
+        help="encode FLUX.2 image latents with the VAE during training instead of reading latent cache files",
+    )
     flux2_utils.add_model_version_args(parser)
     return parser
 
