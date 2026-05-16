@@ -844,7 +844,11 @@ def load_video(
 
 class BucketBatchManager:
     def __init__(
-        self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
+        self,
+        bucketed_item_info: dict[tuple[Any], list[ItemInfo]],
+        batch_size: int,
+        num_timestep_buckets: Optional[int] = None,
+        no_text_encoder_cache: bool = False,
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
@@ -852,6 +856,7 @@ class BucketBatchManager:
         self.bucket_resos.sort()
         self.num_timestep_buckets = num_timestep_buckets
         self.timestep_pool = None
+        self.no_text_encoder_cache = no_text_encoder_cache
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
         self.bucket_batch_indices: list[tuple[tuple[Any], int]] = []
@@ -923,8 +928,11 @@ class BucketBatchManager:
         varlen_keys = set()
         for item_info in bucket[start:end]:
             sd_latent = load_file(item_info.latent_cache_path)
-            sd_te = load_file(item_info.text_encoder_output_cache_path)
-            sd = {**sd_latent, **sd_te}
+            if self.no_text_encoder_cache:
+                sd = sd_latent
+            else:
+                sd_te = load_file(item_info.text_encoder_output_cache_path)
+                sd = {**sd_latent, **sd_te}
 
             # TODO refactor this
             for key in sd.keys():
@@ -949,8 +957,13 @@ class BucketBatchManager:
                     varlen_keys.add(content_key)
 
         for key in batch_tensor_data.keys():
+            if key == "captions":
+                continue
             if key not in varlen_keys:
                 batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
+
+        if self.no_text_encoder_cache:
+            batch_tensor_data["captions"] = [item_info.caption for item_info in bucket[start:end]]
 
         if self.timestep_pool is not None:
             batch_tensor_data["timesteps"] = self.timestep_pool[idx][: end - start]  # use the pre-generated timesteps
@@ -1788,6 +1801,7 @@ class ImageDataset(BaseDataset):
         fp_1f_target_index: Optional[int] = None,
         fp_1f_no_post: Optional[bool] = False,
         no_latent_cache: Optional[bool] = False,
+        no_text_encoder_cache: Optional[bool] = False,
         no_resize_control: Optional[bool] = False,
         control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
@@ -1813,8 +1827,16 @@ class ImageDataset(BaseDataset):
         self.fp_1f_target_index = fp_1f_target_index
         self.fp_1f_no_post = fp_1f_no_post
         self.no_latent_cache = no_latent_cache
+        self.no_text_encoder_cache = no_text_encoder_cache
         self.no_resize_control = no_resize_control
         self.control_resolution = control_resolution
+
+        if self.no_text_encoder_cache and self.architecture not in (
+            ARCHITECTURE_FLUX_2_DEV,
+            ARCHITECTURE_FLUX_2_KLEIN_4B,
+            ARCHITECTURE_FLUX_2_KLEIN_9B,
+        ):
+            raise ValueError("--no_text_encoder_cache is currently supported only for FLUX.2 image datasets")
 
         control_count_per_image: Optional[int] = 1
         if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
@@ -1862,6 +1884,17 @@ class ImageDataset(BaseDataset):
 
     def get_total_image_count(self):
         return len(self.datasource) if self.datasource.is_indexable() else None
+
+    def get_caption_map_by_item_key(self) -> dict[str, str]:
+        if not self.datasource.is_indexable():
+            raise ValueError("--no_text_encoder_cache requires an indexable image dataset")
+
+        caption_map = {}
+        for source_index in range(len(self.datasource)):
+            item_key, caption = self.datasource.get_caption(source_index)
+            item_key = os.path.splitext(os.path.basename(item_key))[0]
+            caption_map[item_key] = caption
+        return caption_map
 
     def retrieve_latent_cache_batches(self, num_workers: int):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
@@ -2011,6 +2044,7 @@ class ImageDataset(BaseDataset):
 
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        caption_map = self.get_caption_map_by_item_key() if self.no_text_encoder_cache else None
 
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
@@ -2024,8 +2058,11 @@ class ImageDataset(BaseDataset):
 
             item_key = "_".join(tokens[:-2])
             text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
-            if not os.path.exists(text_encoder_output_cache_file):
+            if not self.no_text_encoder_cache and not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
+                continue
+            if self.no_text_encoder_cache and item_key not in caption_map:
+                logger.warning(f"Caption not found for latent cache file: {cache_file}")
                 continue
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
@@ -2044,7 +2081,8 @@ class ImageDataset(BaseDataset):
                     control_shape = control_key.rsplit("_", 3)[-2]  # FxHxW
                     bucket_reso = tuple(list(bucket_reso) + [control_shape])  # (int, int, str)
 
-            item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
+            caption = caption_map[item_key] if self.no_text_encoder_cache else ""
+            item_info = ItemInfo(item_key, caption, image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
 
             bucket = bucketed_item_info.get(bucket_reso, [])
@@ -2053,7 +2091,12 @@ class ImageDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        self.batch_manager = BucketBatchManager(
+            bucketed_item_info,
+            self.batch_size,
+            num_timestep_buckets=num_timestep_buckets,
+            no_text_encoder_cache=self.no_text_encoder_cache,
+        )
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
@@ -2072,7 +2115,7 @@ class ImageDataset(BaseDataset):
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
 
         for source_index in range(len(self.datasource)):
-            image_key, images, _caption, controls = self.datasource.get_image_data(source_index)
+            image_key, images, caption, controls = self.datasource.get_image_data(source_index)
             image = images[0]
             image_size = image.size
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
@@ -2081,7 +2124,7 @@ class ImageDataset(BaseDataset):
             text_encoder_output_cache_file = os.path.join(
                 self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors"
             )
-            if not os.path.exists(text_encoder_output_cache_file):
+            if not self.no_text_encoder_cache and not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
 
@@ -2108,7 +2151,7 @@ class ImageDataset(BaseDataset):
                         batch_bucket_reso = batch_bucket_reso + [height, width]
                 batch_bucket_reso = tuple(batch_bucket_reso)
 
-            item_info = ItemInfo(item_key, "", image_size, batch_bucket_reso)
+            item_info = ItemInfo(item_key, caption, image_size, batch_bucket_reso)
             item_info.source_index = source_index
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
 
@@ -2173,19 +2216,26 @@ class ImageDataset(BaseDataset):
                 for opened_control in controls:
                     opened_control.close()
 
-            sd_te = load_file(item_info.text_encoder_output_cache_path)
-            for key in sd_te.keys():
-                is_varlen_key = key.startswith("varlen_")
-                content_key = key.replace("varlen_", "") if is_varlen_key else key
-                if not content_key.endswith("_mask"):
-                    content_key = content_key.rsplit("_", 1)[0]
-                if content_key not in batch_tensor_data:
-                    batch_tensor_data[content_key] = []
-                batch_tensor_data[content_key].append(sd_te[key])
-                if is_varlen_key:
-                    varlen_keys.add(content_key)
+            if self.no_text_encoder_cache:
+                if "captions" not in batch_tensor_data:
+                    batch_tensor_data["captions"] = []
+                batch_tensor_data["captions"].append(item_info.caption)
+            else:
+                sd_te = load_file(item_info.text_encoder_output_cache_path)
+                for key in sd_te.keys():
+                    is_varlen_key = key.startswith("varlen_")
+                    content_key = key.replace("varlen_", "") if is_varlen_key else key
+                    if not content_key.endswith("_mask"):
+                        content_key = content_key.rsplit("_", 1)[0]
+                    if content_key not in batch_tensor_data:
+                        batch_tensor_data[content_key] = []
+                    batch_tensor_data[content_key].append(sd_te[key])
+                    if is_varlen_key:
+                        varlen_keys.add(content_key)
 
         for key in batch_tensor_data.keys():
+            if key == "captions":
+                continue
             if key not in varlen_keys:
                 batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
 

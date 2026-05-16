@@ -272,6 +272,10 @@ FLUX.2ではDoubleStreamBlockのメモリ使用量がSingleStreamBlockよりも�
 
 Full fine-tuning for FLUX.2 [klein] base 4B uses `flux_2_train.py`. Use the same latent and Text Encoder output caches as LoRA training.
 
+If you want to skip Text Encoder output pre-caching, specify `--no_text_encoder_cache` together with `--text_encoder`.
+The Text Encoder will be loaded during training and captions will be encoded for each batch.
+This works with cached latents and also with `--no_latent_cache`, but it uses more memory and is slower than pre-caching.
+
 ```bash
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/flux_2_train.py \
     --model_version klein-base-4b \
@@ -299,6 +303,10 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 <summary>日本語</summary>
 
 FLUX.2 [klein] base 4B のフルファインチューニングには `flux_2_train.py` を使用します。LoRA学習と同じ latent / Text Encoder output のキャッシュを使用します。
+
+Text Encoder output の事前キャッシュを省略したい場合は、`--text_encoder` と一緒に `--no_text_encoder_cache` を指定してください。
+学習中に Text Encoder を読み込み、各バッチの caption をその場でエンコードします。
+latent キャッシュありの場合と `--no_latent_cache` の両方で使用できますが、事前キャッシュよりメモリ使用量が増え、速度も遅くなります。
 
 - `flux_2_train.py`を使用します。
 - FLUX.2 [klein] base 4B では `--model_version klein-base-4b` を指定してください。

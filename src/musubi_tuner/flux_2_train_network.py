@@ -45,6 +45,8 @@ class Flux2NetworkTrainer(NetworkTrainer):
         self._control_training = False  # this means video training, not control image training
         self.default_guidance_scale = 4.0  # CFG scale for inference for base models
         self.default_discrete_flow_shift = None  # Use FLUX.2 shift as default
+        self.text_embedder = None
+        self.text_embedder_dtype = None
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         device = accelerator.device
@@ -287,6 +289,37 @@ class Flux2NetworkTrainer(NetworkTrainer):
         clean_memory_on_device(device)
         return batch
 
+    def encode_text_encoder_outputs_in_batch(self, args: argparse.Namespace, accelerator: Accelerator, batch: dict):
+        if "ctx_vec" in batch:
+            return batch
+
+        if not args.no_text_encoder_cache:
+            raise ValueError("Batch does not contain Text Encoder outputs. Create the cache or specify --no_text_encoder_cache.")
+        if args.text_encoder is None:
+            raise ValueError("--no_text_encoder_cache requires --text_encoder")
+        if "captions" not in batch:
+            raise ValueError("Batch does not contain captions for on-the-fly Text Encoder encoding")
+
+        device = accelerator.device
+        if self.text_embedder is None:
+            self.text_embedder_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
+            logger.info(f"Loading text encoder from {args.text_encoder} for on-the-fly encoding")
+            self.text_embedder = flux2_utils.load_text_embedder(
+                self.model_version_info,
+                args.text_encoder,
+                dtype=self.text_embedder_dtype,
+                device=device,
+                disable_mmap=True,
+            )
+            self.text_embedder.eval()
+
+        captions = list(batch["captions"])
+        autocast_dtype = torch.bfloat16 if self.text_embedder_dtype.itemsize == 1 else self.text_embedder_dtype
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
+            batch["ctx_vec"] = self.text_embedder(captions).to(device="cpu", dtype=torch.bfloat16)
+
+        return batch
+
     def call_dit(
         self,
         args: argparse.Namespace,
@@ -323,6 +356,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latents)
 
         # context
+        batch = self.encode_text_encoder_outputs_in_batch(args, accelerator, batch)
         ctx_vec = batch["ctx_vec"]  # B, T, D = B, 512, 15360]
         ctx, ctx_ids = flux2_utils.prc_txt(ctx_vec)  # [B, 512, 15360], [B, 512, 4]
 
@@ -372,6 +406,11 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder checkpoint path")
     parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument(
+        "--no_text_encoder_cache",
+        action="store_true",
+        help="encode FLUX.2 Text Encoder outputs during training instead of reading Text Encoder cache files",
+    )
     parser.add_argument(
         "--no_latent_cache",
         action="store_true",
