@@ -1006,6 +1006,15 @@ class ImageDatasource(ContentDatasource):
     def __init__(self):
         super().__init__()
 
+    def get_image_metadata(
+        self, idx: int
+    ) -> tuple[str, tuple[int, int], str, Optional[list[tuple[int, int]]]]:
+        """
+        Returns image path, image size, caption, and optional control image sizes.
+        Implementations should read only file headers when possible.
+        """
+        raise NotImplementedError
+
     def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, list[Image.Image]]:
         """
         Returns image data as a tuple of image path, image, and caption for the given index.
@@ -1197,6 +1206,24 @@ class ImageDirectoryDatasource(ImageDatasource):
 
         return image_path, images, caption, controls
 
+    def get_image_metadata(
+        self, idx: int
+    ) -> tuple[str, tuple[int, int], str, Optional[list[tuple[int, int]]]]:
+        image_path = self.image_paths[idx]
+        with Image.open(image_path) as image:
+            image_size = image.size
+
+        _, caption = self.get_caption(idx)
+
+        control_sizes = None
+        if self.has_control:
+            control_sizes = []
+            for control_path in self.control_paths[image_path]:
+                with Image.open(control_path) as control:
+                    control_sizes.append(control.size)
+
+        return image_path, image_size, caption, control_sizes
+
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
         caption_path = os.path.splitext(image_path)[0] + self.caption_extension if self.caption_extension else ""
@@ -1327,6 +1354,28 @@ class ImageJsonlDatasource(ImageDatasource):
                 controls.append(control)
 
         return image_path, images, caption, controls
+
+    def get_image_metadata(
+        self, idx: int
+    ) -> tuple[str, tuple[int, int], str, Optional[list[tuple[int, int]]]]:
+        data = self.data[idx]
+        image_path = data.get("image_path", data.get("image_path_0"))
+        with Image.open(image_path) as image:
+            image_size = image.size
+
+        caption = data["caption"]
+
+        control_sizes = None
+        if self.has_control:
+            control_sizes = []
+            for i in range(self.control_count_per_image or 1000):
+                if f"control_path_{i}" not in data:
+                    break
+                control_path = data[f"control_path_{i}"]
+                with Image.open(control_path) as control:
+                    control_sizes.append(control.size)
+
+        return image_path, image_size, caption, control_sizes
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]
@@ -2142,9 +2191,7 @@ class ImageDataset(BaseDataset):
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
 
         for source_index in tqdm(range(len(self.datasource)), desc="Creating buckets"):
-            image_key, images, caption, controls = self.datasource.get_image_data(source_index)
-            image = images[0]
-            image_size = image.size
+            image_key, image_size, caption, control_sizes = self.datasource.get_image_metadata(source_index)
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
 
             item_key = os.path.splitext(os.path.basename(image_key))[0]
@@ -2154,16 +2201,16 @@ class ImageDataset(BaseDataset):
                 continue
 
             batch_bucket_reso: Union[tuple[int, int], Any] = bucket_reso
-            if controls is not None and (self.no_resize_control or self.control_resolution is not None):
+            if control_sizes is not None and (self.no_resize_control or self.control_resolution is not None):
                 batch_bucket_reso = list(batch_bucket_reso)
-                for control in controls:
+                for control_size in control_sizes:
                     if self.no_resize_control:
-                        width, height = control.size
+                        width, height = control_size
                         if self.control_resolution is not None:
                             max_width, max_height = self.control_resolution
                             if width * height > max_width * max_height:
                                 width, height = BucketSelector.calculate_bucket_resolution(
-                                    control.size, self.control_resolution, architecture=self.architecture
+                                    control_size, self.control_resolution, architecture=self.architecture
                                 )
                         else:
                             width = width - (width % bucket_selector.reso_steps)
@@ -2171,7 +2218,7 @@ class ImageDataset(BaseDataset):
                         batch_bucket_reso = batch_bucket_reso + [height, width]
                     elif self.control_resolution is not None:
                         width, height = BucketSelector.calculate_bucket_resolution(
-                            control.size, self.control_resolution, architecture=self.architecture
+                            control_size, self.control_resolution, architecture=self.architecture
                         )
                         batch_bucket_reso = batch_bucket_reso + [height, width]
                 batch_bucket_reso = tuple(batch_bucket_reso)
@@ -2185,13 +2232,9 @@ class ImageDataset(BaseDataset):
                 bucket.append(item_info)
             bucketed_item_info[batch_bucket_reso] = bucket
 
-            for opened_image in images:
-                opened_image.close()
-            if controls is not None:
-                for opened_control in controls:
-                    opened_control.close()
-
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        self.batch_manager = BucketBatchManager(
+            bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets
+        )
         self.batch_manager.show_bucket_info()
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
 
