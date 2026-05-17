@@ -320,7 +320,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         captions = list(batch["captions"])
         autocast_dtype = torch.bfloat16 if self.text_embedder_dtype.itemsize == 1 else self.text_embedder_dtype
-        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.inference_mode():
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
             batch["ctx_vec"] = self.text_embedder(captions).to(dtype=torch.bfloat16)
 
         return batch
