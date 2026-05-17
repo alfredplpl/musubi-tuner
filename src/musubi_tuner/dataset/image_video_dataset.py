@@ -21,6 +21,7 @@ from safetensors.torch import save_file, load_file
 from PIL import Image
 import cv2
 import av
+from tqdm import tqdm
 
 from musubi_tuner.utils import safetensors_utils
 from musubi_tuner.utils.model_utils import dtype_to_str
@@ -2073,7 +2074,7 @@ class ImageDataset(BaseDataset):
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
-        for cache_file in latent_cache_files:
+        for cache_file in tqdm(latent_cache_files, desc="Creating buckets"):
             tokens = os.path.basename(cache_file).split("_")
 
             image_size = tokens[-2]  # 0000x0000
@@ -2140,7 +2141,7 @@ class ImageDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
 
-        for source_index in range(len(self.datasource)):
+        for source_index in tqdm(range(len(self.datasource)), desc="Creating buckets"):
             image_key, images, caption, controls = self.datasource.get_image_data(source_index)
             image = images[0]
             image_size = image.size
