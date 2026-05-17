@@ -761,31 +761,29 @@ class Qwen3Embedder(nn.Module):
         return self.model.to(*args, **kwargs)
 
     def forward(self, txt: list[str]):
-        all_input_ids = []
-        all_attention_masks = []
+        if not isinstance(txt, list):
+            txt = [txt]
 
-        for prompt in txt:
-            messages = [{"role": "user", "content": prompt}]
-            text = self.tokenizer.apply_chat_template(
-                messages,
+        texts = [
+            self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
+            for prompt in txt
+        ]
 
-            model_inputs = self.tokenizer(
-                text,
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=self.max_length,
-            )
+        model_inputs = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_length,
+        )
 
-            all_input_ids.append(model_inputs["input_ids"])
-            all_attention_masks.append(model_inputs["attention_mask"])
-
-        input_ids = torch.cat(all_input_ids, dim=0).to(self.model.device)
-        attention_mask = torch.cat(all_attention_masks, dim=0).to(self.model.device)
+        input_ids = model_inputs["input_ids"].to(self.model.device)
+        attention_mask = model_inputs["attention_mask"].to(self.model.device)
 
         output = self.model(
             input_ids=input_ids,

@@ -163,8 +163,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
             ref_tokens, ref_ids = flux2_utils.pack_control_latent(control_latent_list)
 
-            vae.to("cpu")
-            clean_memory_on_device(device)
+            if not (args.no_latent_cache and args.vae_on_device):
+                vae.to("cpu")
+                clean_memory_on_device(device)
 
         # denoise
         timesteps = flux2_utils.get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
@@ -212,8 +213,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
         pixels = pixels.to(torch.float32).cpu()
         pixels = (pixels / 2 + 0.5).clamp(0, 1)  # -1 to 1 -> 0 to 1
 
-        vae.to("cpu")
-        clean_memory_on_device(device)
+        if not (args.no_latent_cache and args.vae_on_device):
+            vae.to("cpu")
+            clean_memory_on_device(device)
 
         pixels = pixels.unsqueeze(2)  # add a dummy dimension for video frames, B C H W -> B C 1 H W
         return pixels
@@ -269,6 +271,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             raise ValueError("Batch does not contain latents or source images")
 
         device = accelerator.device
+        keep_vae_on_device = args.no_latent_cache and args.vae_on_device
         vae.to(device)
         vae.eval()
 
@@ -285,8 +288,9 @@ class Flux2NetworkTrainer(NetworkTrainer):
                 batch[f"latents_control_{control_index}"] = vae.encode(control_images)
                 control_index += 1
 
-        vae.to("cpu")
-        clean_memory_on_device(device)
+        if not keep_vae_on_device:
+            vae.to("cpu")
+            clean_memory_on_device(device)
         return batch
 
     def encode_text_encoder_outputs_in_batch(self, args: argparse.Namespace, accelerator: Accelerator, batch: dict):
@@ -311,12 +315,13 @@ class Flux2NetworkTrainer(NetworkTrainer):
                 device=device,
                 disable_mmap=True,
             )
+            self.text_embedder.requires_grad_(False)
             self.text_embedder.eval()
 
         captions = list(batch["captions"])
         autocast_dtype = torch.bfloat16 if self.text_embedder_dtype.itemsize == 1 else self.text_embedder_dtype
-        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
-            batch["ctx_vec"] = self.text_embedder(captions).to(device="cpu", dtype=torch.bfloat16)
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.inference_mode():
+            batch["ctx_vec"] = self.text_embedder(captions).to(dtype=torch.bfloat16)
 
         return batch
 
@@ -415,6 +420,11 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         "--no_latent_cache",
         action="store_true",
         help="encode FLUX.2 image latents with the VAE during training instead of reading latent cache files",
+    )
+    parser.add_argument(
+        "--vae_on_device",
+        action="store_true",
+        help="keep the VAE on the training device with --no_latent_cache to avoid CPU/GPU transfers between batches",
     )
     flux2_utils.add_model_version_args(parser)
     return parser
