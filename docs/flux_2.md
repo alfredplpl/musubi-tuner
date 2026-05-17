@@ -94,6 +94,15 @@ For model training, it is recommended to use klein base 4B or 9B. The dev and kl
 
 ## Pre-caching / 事前キャッシング
 
+For very large FLUX.2 datasets, set `cache_directory_shards` in the dataset config to distribute latent and Text Encoder output caches into subdirectories under `cache_directory`.
+
+```toml
+[[datasets]]
+image_jsonl_file = "/path/to/images.jsonl"
+cache_directory = "/path/to/cache"
+cache_directory_shards = 4096
+```
+
 ### Latent Pre-caching / latentの事前キャッシング
 
 Latent pre-caching uses a dedicated script for FLUX.2.
@@ -123,6 +132,8 @@ python src/musubi_tuner/flux_2_cache_latents.py \
 
 <details>
 <summary>日本語</summary>
+
+非常に大きいFLUX.2データセットでは、dataset configに`cache_directory_shards`を指定すると、latentとText Encoder outputのキャッシュを`cache_directory`配下のサブディレクトリへ分散して保存できます。
 
 latentの事前キャッシングはFLUX.2専用のスクリプトを使用します。
 

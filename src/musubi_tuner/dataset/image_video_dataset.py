@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import glob
+import hashlib
 from importlib.util import find_spec
 import json
 import math
@@ -1630,6 +1631,7 @@ class BaseDataset(torch.utils.data.Dataset):
         enable_bucket: bool = False,
         bucket_no_upscale: bool = False,
         cache_directory: Optional[str] = None,
+        cache_directory_shards: Optional[int] = 1,
         debug_dataset: bool = False,
         architecture: str = "no_default",
     ):
@@ -1640,6 +1642,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.enable_bucket = enable_bucket
         self.bucket_no_upscale = bucket_no_upscale
         self.cache_directory = cache_directory
+        self.cache_directory_shards = cache_directory_shards if cache_directory_shards is not None else 1
         self.debug_dataset = debug_dataset
         self.architecture = architecture
         self.seed = None
@@ -1648,6 +1651,8 @@ class BaseDataset(torch.utils.data.Dataset):
 
         if not self.enable_bucket:
             self.bucket_no_upscale = False
+        if self.cache_directory_shards < 1:
+            raise ValueError("cache_directory_shards must be 1 or greater / cache_directory_shardsは1以上である必要があります")
 
     def get_metadata(self) -> dict:
         metadata = {
@@ -1657,14 +1662,31 @@ class BaseDataset(torch.utils.data.Dataset):
             "num_repeats": self.num_repeats,
             "enable_bucket": bool(self.enable_bucket),
             "bucket_no_upscale": bool(self.bucket_no_upscale),
+            "cache_directory_shards": self.cache_directory_shards,
         }
         return metadata
 
+    def _get_cache_files(self, suffix: str):
+        assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"
+        pattern = f"*_{self.architecture}{suffix}.safetensors"
+        if self.cache_directory_shards <= 1:
+            return glob.glob(os.path.join(self.cache_directory, pattern))
+        return glob.glob(os.path.join(self.cache_directory, "shard_*", pattern))
+
     def get_all_latent_cache_files(self):
-        return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        return self._get_cache_files("")
 
     def get_all_text_encoder_output_cache_files(self):
-        return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}_te.safetensors"))
+        return self._get_cache_files("_te")
+
+    def get_cache_directory_for_basename(self, basename: str) -> str:
+        assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"
+        if self.cache_directory_shards <= 1:
+            return self.cache_directory
+        digest = hashlib.sha1(basename.encode("utf-8")).hexdigest()
+        shard_index = int(digest[:8], 16) % self.cache_directory_shards
+        shard_width = max(4, len(str(self.cache_directory_shards - 1)))
+        return os.path.join(self.cache_directory, f"shard_{shard_index:0{shard_width}d}")
 
     def get_latent_cache_path(self, item_info: ItemInfo) -> str:
         """
@@ -1679,13 +1701,13 @@ class BaseDataset(torch.utils.data.Dataset):
         """
         w, h = item_info.original_size
         basename = os.path.splitext(os.path.basename(item_info.item_key))[0]
-        assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"
-        return os.path.join(self.cache_directory, f"{basename}_{w:04d}x{h:04d}_{self.architecture}.safetensors")
+        cache_directory = self.get_cache_directory_for_basename(basename)
+        return os.path.join(cache_directory, f"{basename}_{w:04d}x{h:04d}_{self.architecture}.safetensors")
 
     def get_text_encoder_output_cache_path(self, item_info: ItemInfo) -> str:
         basename = os.path.splitext(os.path.basename(item_info.item_key))[0]
-        assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"
-        return os.path.join(self.cache_directory, f"{basename}_{self.architecture}_te.safetensors")
+        cache_directory = self.get_cache_directory_for_basename(basename)
+        return os.path.join(cache_directory, f"{basename}_{self.architecture}_te.safetensors")
 
     def retrieve_latent_cache_batches(self, num_workers: int):
         raise NotImplementedError
@@ -1795,6 +1817,7 @@ class ImageDataset(BaseDataset):
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
+        cache_directory_shards: Optional[int] = 1,
         multiple_target: bool = False,
         fp_latent_window_size: Optional[int] = 9,
         fp_1f_clean_indices: Optional[list[int]] = None,
@@ -1815,6 +1838,7 @@ class ImageDataset(BaseDataset):
             enable_bucket,
             bucket_no_upscale,
             cache_directory,
+            cache_directory_shards,
             debug_dataset,
             architecture,
         )
@@ -2043,7 +2067,7 @@ class ImageDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = self.get_all_latent_cache_files()
         caption_map = self.get_caption_map_by_item_key() if self.no_text_encoder_cache else None
 
         # assign cache files to item info
@@ -2057,7 +2081,9 @@ class ImageDataset(BaseDataset):
             image_size = (image_width, image_height)
 
             item_key = "_".join(tokens[:-2])
-            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
+            text_encoder_output_cache_file = self.get_text_encoder_output_cache_path(
+                ItemInfo(item_key, "", image_size, latent_cache_path=cache_file)
+            )
             if not self.no_text_encoder_cache and not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
@@ -2121,9 +2147,7 @@ class ImageDataset(BaseDataset):
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
 
             item_key = os.path.splitext(os.path.basename(image_key))[0]
-            text_encoder_output_cache_file = os.path.join(
-                self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors"
-            )
+            text_encoder_output_cache_file = self.get_text_encoder_output_cache_path(ItemInfo(item_key, "", image_size))
             if not self.no_text_encoder_cache and not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
@@ -2299,6 +2323,7 @@ class VideoDataset(BaseDataset):
         video_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
         cache_directory: Optional[str] = None,
+        cache_directory_shards: Optional[int] = 1,
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
@@ -2311,6 +2336,7 @@ class VideoDataset(BaseDataset):
             enable_bucket,
             bucket_no_upscale,
             cache_directory,
+            cache_directory_shards,
             debug_dataset,
             architecture,
         )
@@ -2557,7 +2583,7 @@ class VideoDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = self.get_all_latent_cache_files()
 
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
@@ -2572,7 +2598,9 @@ class VideoDataset(BaseDataset):
             frame_pos, frame_count = int(frame_pos), int(frame_count)
 
             item_key = "_".join(tokens[:-3])
-            text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
+            text_encoder_output_cache_file = self.get_text_encoder_output_cache_path(
+                ItemInfo(item_key, "", image_size, frame_count=frame_count, latent_cache_path=cache_file)
+            )
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue

@@ -38,6 +38,7 @@ bucket_no_upscale = false
 [[datasets]]
 image_directory = "/path/to/image_dir"
 cache_directory = "/path/to/cache_directory"
+cache_directory_shards = 4096 # optional, default is 1. Distribute cache files into shard_0000, shard_0001, ...
 num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
 # multiple_target = true # optional, default is false. Set to true for Qwen-Image-Layered training.
 
@@ -47,6 +48,8 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 `image_directory` is the directory containing images. The captions are stored in text files with the same filename as the image, but with the extension specified by `caption_extension` (for example, `image1.jpg` and `image1.txt`).
 
 `cache_directory` is optional, default is None to use the same directory as the image directory. However, we recommend to set the cache directory to avoid accidental sharing of the cache files between different datasets.
+
+`cache_directory_shards` is optional, default is 1. If set to 2 or more, cache files are distributed into deterministic subdirectories such as `shard_0000` under `cache_directory`. This is useful for very large datasets where storing millions of cache files in a single directory becomes slow.
 
 `num_repeats` is also available. It is optional, default is 1 (no repeat). It repeats the images (or videos) that many times to expand the dataset. For example, if `num_repeats = 2` and there are 20 images in the dataset, each image will be duplicated twice (with the same caption) to have a total of 40 images. It is useful to balance the multiple datasets with different sizes.
 
@@ -66,6 +69,8 @@ The next combination would be stored as `/path/to/layer_images/image2.txt` for c
 `image_directory`は画像を含むディレクトリのパスです。キャプションは、画像と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`image1.jpg`と`image1.txt`）。
 
 `cache_directory` はオプションです。デフォルトは画像ディレクトリと同じディレクトリに設定されます。ただし、異なるデータセット間でキャッシュファイルが共有されるのを防ぐために、明示的に別のキャッシュディレクトリを設定することをお勧めします。
+
+`cache_directory_shards` はオプションで、デフォルトは 1 です。2以上を指定すると、キャッシュファイルは `cache_directory` 配下の `shard_0000` などのサブディレクトリへ決定的に分散して保存されます。数百万件以上のキャッシュを単一ディレクトリに置くと遅くなる場合に有効です。
 
 `num_repeats` はオプションで、デフォルトは 1 です（繰り返しなし）。画像（や動画）を、その回数だけ単純に繰り返してデータセットを拡張します。たとえば`num_repeats = 2`としたとき、画像20枚のデータセットなら、各画像が2枚ずつ（同一のキャプションで）計40枚存在した場合と同じになります。異なるデータ数のデータセット間でバランスを取るために使用可能です。
 
